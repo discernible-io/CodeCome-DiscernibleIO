@@ -37,5 +37,6 @@
       "temperature": 0,
       "top_p": 1
     }
-  }
+  },
+  "model": "cursor/composer-2.5"
 }

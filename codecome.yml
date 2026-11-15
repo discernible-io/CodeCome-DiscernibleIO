@@ -1,15 +1,16 @@
 project:
-  name: "codecome-target"
+  name: "idclawserver-idc"
   source_path: "./src"
   profile: "auto"
   languages:
-    - "auto"
+    - "javascript"
 
 target:
-  description: "Source code to be audited by CodeCome."
+  description: "IdentyClaw HTTP API (Express/Node) for AI agent identities on NEAR with HOLA mutual authentication and JWT API login."
   assumptions:
-    - "The agent must infer the target type during reconnaissance."
-    - "The source may be a web app, service, CLI tool, library, benchmark corpus, infrastructure repository, firmware tree, or mixed project."
+    - "Primary stack is Node.js + Express; auth uses Ed25519 login signatures (JWT) and HOLA slash-separated peer identity lines."
+    - "External NEAR RPC / Passport / mint services may be unavailable in sandbox; prefer static proof and local unit tests when runtime deps are missing."
+    - "Container runtime on this host is Podman (docker CLI is a podman shim); use podman-compose from the workspace .venv, never Docker Desktop."
     - "Target-specific logic must live in skills, notes, or adapters, not in the core workflow."
 
 audit:
@@ -37,16 +38,19 @@ audit:
       - "trust_boundary"
       - "assets_at_risk"
 
-  # Per-phase extra instructions appended to the phase prompt.
-  # These are persistent and always applied when the phase runs.
-  # See also: PROMPT_EXTRA and PROMPT_EXTRA_FILE env vars for ad-hoc use.
-  #
-  # extra_prompts:
-  #   reconnaissance: |
-  #     Focus sandbox on ASAN builds.
-  #     Skip fuzzing harness for now.
-  #   hypothesis_generation: |
-  #     Prioritize memory safety issues over logic bugs.
+  extra_prompts:
+    reconnaissance: |
+      Host container engine is Podman. Prefer podman / podman-compose (workspace .venv).
+      Do not require Docker Engine. Reuse templates/sandboxes/node and adapt for Express.
+      High-value areas: src/app.js routes, login/JWT, HOLA verify, METHOD_PERMISSION_MAP,
+      nginx config, api.Dockerfile, config/, and crypto helpers.
+    hypothesis_generation: |
+      Prioritize auth bypass, signature verification flaws, JWT handling, HOLA nonce/replay,
+      authorization gaps vs METHOD_PERMISSION_MAP, SSRF via outbound HTTP, secret leakage,
+      and unsafe request parsing. Skip memory-safety classes (N/A for Node).
+    counter_analysis: |
+      Reject findings that require production-only ingress without a local reproduction path.
+      Keep NEEDS_VALIDATION when NEAR RPC or external Passport is required.
 
   scope:
     include:
@@ -67,23 +71,27 @@ audit:
       - "src/**/.gradle/**"
       - "src/**/.idea/**"
       - "src/**/.vscode/**"
+      - "src/**/private-docs/**"
+      - "src/**/.tmp-funnel/**"
+      - "src/**/identyclaw-skill/**"
+      - "src/**/identyclaw-a2a-trust-skill/**"
+      - "src/**/hermes-identyclaw-skill/**"
+      - "src/**/examples/**"
 
   focus:
     - "Authentication and authorization flaws"
-    - "Injection vulnerabilities"
-    - "Memory safety issues"
-    - "Path traversal"
-    - "Unsafe deserialization"
     - "Cryptographic misuse"
+    - "JWT and session handling"
+    - "HOLA mutual authentication / replay"
+    - "Injection vulnerabilities"
+    - "Server-side request forgery"
     - "Secrets exposure"
     - "Business logic vulnerabilities"
     - "Supply chain risks"
     - "Insecure configuration"
     - "Improper input validation"
-    - "Server-side request forgery"
-    - "File upload vulnerabilities"
-    - "Race conditions"
     - "Privilege escalation"
+    - "Race conditions"
 
   static_analysis:
     codeql:
@@ -198,23 +206,14 @@ agents:
   directory: "./.opencode/agents"
   default_mode: "single_agent_sequential"
 
-  # Optional per-agent model and variant pinning consumed by
-  # tools/run-agent.py (the wrapper used by `make phase-*`).
-  # Resolution priority: OPENCODE_ARGS > env (CODECOME_MODEL,
-  # CODECOME_MODEL_VARIANT) > codecome.yml > unknown.
-  #
-  # Uncomment and adjust to pin specific models per phase:
-  #
-  # recon:
-  #   model: "anthropic/claude-opus-4-7"
-  #   variant: "high"
-  # auditor:
-  #   model: "anthropic/claude-opus-4-7"
-  # reviewer:
-  #   model: "anthropic/claude-opus-4-7"
-  # validator:
-  #   model: "anthropic/claude-opus-4-7"
-  # exploiter:
-  #   model: "anthropic/claude-opus-4-7"
-  # reporter:
-  #   model: "anthropic/claude-opus-4-7"
+  recon:
+    model: "cursor/composer-2.5"
+  auditor:
+    model: "cursor/composer-2.5"
+  reviewer:
+    model: "cursor/composer-2.5"
+  validator:
+    model: "cursor/composer-2.5"
+  reporter:
+    model: "cursor/composer-2.5"
+

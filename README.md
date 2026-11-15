@@ -11,11 +11,15 @@
 
 ## What is CodeCome?
 
-[CodeCome](https://codecome.ai) is the harness I built to let an AI agent help me audit source code without losing the trail.
+[CodeCome](https://codecome.ai) is the harness built to let an AI agent help audit source code without losing the trail.
 
 It turns "I think there might be a bug here" into a structured Markdown finding, validates it inside a sandbox, escalates the ones that matter into working proof-of-concept exploits, and produces a report you can read, grep, and commit. It is not a scanner and not a pentest tool. Think of it as a **research methodology made executable**: the same six phases, the same artifact shapes, the same evidence rules — every time, for every target.
 
 The whole audit lives on disk as plain Markdown and YAML. No database, no RAG, no ticketing system, nothing magical. If you can read a directory, you can review a CodeCome audit.
+
+## This fork (CodeCome-Recommended)
+
+This repository is a recommended fork of [pruiz/CodeCome](https://github.com/pruiz/CodeCome). It keeps the same six-phase harness and workspace layout, and adds classification, dedup, provenance, export, and skill improvements used in day-to-day audits. See [Differences from upstream](#differences-from-upstream) for the full list.
 
 ## Screenshots
 
@@ -126,10 +130,17 @@ When you're ready:
     make check                      # sanity-check the workspace
     make phase-1                    # recon + sandbox bootstrap
     make phase-2                    # generate candidate findings
-    make phase-3                    # counter-analysis (dedup / reject)
+    make phase-3                    # counter-analysis (dedup / reject / NEEDS_VALIDATION)
     make phase-4 FINDING=CC-0001    # validate one finding
     make phase-5 FINDING=CC-0001    # build a PoC for a confirmed finding
     make phase-6                    # generate the report
+
+To line finding ids up with an internal tracker, pass the first id when Phase 1 starts. Later findings continue from that sequence instead of minting another `CC-0001`. The request is saved in `itemdb/notes/id-scheme.yml` and reused by `make findings-create` and `make next-id`.
+
+    make phase-1 ID_SCHEME=CC-0142
+    make phase-1 ID_SCHEME=INT-0007 ID_LEDGER=$HOME/.codecome/finding-ids.json
+
+Phase 1 also records git provenance of `src/` into `itemdb/source-version.yml` so Phase 6 reports stay tied to an exact revision (and warns when the checkout is missing, dirty, or behind its upstream). Re-run with `make source-version` any time.
 
 There are convenience targets too — `make validate-all`, `make exploit-all`, `make sweep` — but you almost never want to use them on a fresh project. Walk one finding through end-to-end first; you'll learn more from one CC-0001 than from twenty PENDING ones.
 
@@ -182,16 +193,16 @@ CodeCome integrates GitHub's [CodeQL](https://codeql.github.com/) as an optional
 
 If you want a one-click vulnerability scanner, this is not it. CodeCome is for people who want **the model to help them think**, not to replace the thinking.
 
-## Why I built it
+## Why it exists
 
-After watching too many chat sessions produce confident-sounding "potential SQL injection" claims with zero evidence, I wanted a workflow where:
+After too many chat sessions produced confident-sounding "potential SQL injection" claims with zero evidence, CodeCome was built so that:
 
 - every claim is a file on disk,
 - every file points at specific lines of code,
 - every finding either has evidence or gets rejected,
 - and the whole thing is reviewable by a human in an afternoon.
 
-CodeCome is the harness I wish I'd had the first time I tried to use an agent for vulnerability research.
+This fork keeps that contract and tightens classification, dedup, and provenance so audits stay comparable across targets and trackers.
 
 ## What a finding looks like
 
@@ -266,6 +277,29 @@ returned inline. Evidence under `itemdb/evidence/CC-0022/`.
 
 That single file is the entire interface between the model and you: a hypothesis with enough detail to either disprove it, validate it, or hand it to a developer.
 
+### Capability class (not severity)
+
+This fork does **not** use Critical / High / Medium / Low or CVSS. Findings are classified by the forbidden outcome in `capability`:
+
+```yaml
+capability:
+  forbidden: true
+  disposition: live          # not-shipped | dormant | live
+  exposure: internet         # local | adjacent | internet | build
+  gate: any-account          # chained | privileged | any-account | none
+  cooperation: ambient       # aimed | ambient
+  effect: read-sensitive     # see effects below
+  boundary: other-principal  # self | service | other-principal | higher-principal | other-tenant | host
+  scope: tenant              # one-object | one-principal | tenant | cross-tenant | fleet
+  durability: once           # once | persists | reexecutes
+```
+
+Effects, from most power to least: `execute-on-host`, `execute-in-app`, `actuate`, `impersonate`, `bypass-control`, `write-security`, `read-secrets`, `destroy`, `deny`, `write-data`, `read-sensitive`, `read-public`, `none`.
+
+PENDING findings may leave enum fields empty. CONFIRMED and EXPLOITED findings require a fully populated capability block. Phase 5 may reclassify the outcome based on demonstrated impact. Full rules live in `AGENTS.md` and `.opencode/skills/finding-format/`.
+
+Every new finding also carries a stable root-cause `fingerprint` (`<class>:<path>#<symbol>[:<qualifier>]`) used for deduplication across Phase 2 / deep sweep / Phase 3.
+
 ## Workspace layout
 
     .
@@ -284,7 +318,8 @@ That single file is the entire interface between the model and you: a hypothesis
 
 `itemdb/` is the heart of an audit. Everything important lives there:
 
-- `itemdb/notes/` — reconnaissance notes (target profile, attack surface, build model, trust boundaries, …)
+- `itemdb/notes/` — reconnaissance notes (target profile, attack surface, build model, trust boundaries, …) plus `id-scheme.yml` when a custom finding-id sequence was requested
+- `itemdb/source-version.yml` — git provenance of the scanned `src/` tree
 - `itemdb/findings/PENDING|NEEDS_VALIDATION|CONFIRMED|EXPLOITED|REJECTED|DUPLICATE/` — findings by status.
 - `itemdb/evidence/<finding-id>/` — validation evidence and PoCs.
 - `itemdb/reports/` — generated reports.
@@ -317,12 +352,13 @@ Run phases through `make` targets — they handle readiness gates and agent sele
 ### Phase 1 — reconnaissance + sandbox bootstrap
 
     make phase-1
+    make phase-1 ID_SCHEME=CC-0142   # optional: first finding id for this audit
 
 Three subphases run in sequence:
 
-- **1a (profiling)** — target profiling and CodeQL plan generation. Writes notes under `itemdb/notes/` including `codeql-plan.yml`.
+- **1a (profiling)** — target profiling and CodeQL plan generation. Writes notes under `itemdb/notes/` including `codeql-plan.yml`. Also records the finding-id scheme (when `ID_SCHEME` is set) and source git provenance (`itemdb/source-version.yml`).
 - **1b (sandbox bootstrap)** — picks a curated baseline from `templates/sandboxes/<id>/`, applies it to `sandbox/` (with marker substitution), validates it, and writes `itemdb/notes/sandbox-plan.md` plus `sandbox/CODECOME-GENERATED.md`.
-- **1c (reconnaissance)** — CodeQL-assisted detailed reconnaissance using static analysis signals, producing the `file-risk-index.yml` and other recon notes.
+- **1c (reconnaissance)** — CodeQL-assisted detailed reconnaissance using static analysis signals, producing the `file-risk-index.yml` and other recon notes. Selects domain companion skills into `suggested_skills` for Phase 2.
 
 CodeQL runs after sandbox bootstrap (1b) and before reconnaissance (1c), so it can build and analyze the target inside the sandbox.
 
@@ -357,7 +393,7 @@ See `docs/sandbox.md` for the full bootstrap workflow.
 
     make phase-2
 
-Creates candidate findings under `itemdb/findings/PENDING/`. Gated by the sandbox: blocks if `sandbox/` is missing or if the most recent validation failed. Override with `CODECOME_ALLOW_NO_SANDBOX=1`.
+Creates candidate findings under `itemdb/findings/PENDING/`. Each finding must carry a root-cause `fingerprint` and a `capability` skeleton (enums may be empty until confirmed). Gated by the sandbox: blocks if `sandbox/` is missing or if the most recent validation failed. Override with `CODECOME_ALLOW_NO_SANDBOX=1`.
 
 #### Deep sweep (optional)
 
@@ -392,13 +428,13 @@ See `docs/file-risk-sweeps.md` for the full reference.
 
     make phase-3
 
-Reviews candidate findings. Moves weak findings to `itemdb/findings/REJECTED/` and repeats to `itemdb/findings/DUPLICATE/`.
+Reviews candidate findings. Moves weak findings to `itemdb/findings/REJECTED/`, repeats (matched by `fingerprint` first, then semantic fields) to `itemdb/findings/DUPLICATE/`, and source-grounded leads blocked on facts outside the repo and sandbox to `itemdb/findings/NEEDS_VALIDATION/`.
 
 ### Phase 4 — validation
 
     make phase-4 FINDING=CC-0001
 
-One finding at a time. Stores evidence under `itemdb/evidence/<finding-id>/` and moves findings to `CONFIRMED/` or `REJECTED/`.
+One finding at a time. Stores evidence under `itemdb/evidence/<finding-id>/` and moves findings to `CONFIRMED/` or `REJECTED/`. A finding in `NEEDS_VALIDATION` can be resumed with the same command once the external fact is available.
 
 To run validation across all PENDING findings:
 
@@ -470,6 +506,7 @@ All three can be combined in a single invocation.
     make hints                                 # print open questions and re-run hints from run summaries
     make index                                 # regenerate finding index
     make report                                # regenerate report
+    make source-version                        # record src/ git provenance into itemdb/source-version.yml
     make confluence-export                     # publish report.md to Confluence
     make confluence-export-findings            # publish CONFIRMED/EXPLOITED findings
     make list-risk-files                       # top-scoring risky files from index
@@ -726,11 +763,14 @@ This is early-stage software. Honestly:
 **What works well today:**
 
 - Markdown findings with structured YAML frontmatter — stable format, no surprise schema changes.
+- Capability classification (forbidden outcome) instead of severity/CVSS.
 - File-based item database — no DB, no RAG, easy to grep, easy to commit.
+- `fingerprint` dedup and `NEEDS_VALIDATION` for leads blocked on external facts.
 - Per-phase make targets with readiness gates.
 - Docker-based sandbox bootstrap for common stacks (Python, C/C++, .NET, PHP, IaC, …).
 - Styled wrapper output with per-tool renderers.
 - Per-finding evidence directories and an exploit subdirectory layout for Phase 5.
+- Optional Confluence export for reports and confirmed/exploited findings.
 
 **What's still rough or missing:**
 
@@ -743,27 +783,48 @@ This is early-stage software. Honestly:
 
 Patches, issues, and feedback all welcome.
 
+## Differences from upstream
+
+Relative to [pruiz/CodeCome](https://github.com/pruiz/CodeCome) (`upstream/master`), this fork adds:
+
+| Area | Upstream | This fork |
+|------|----------|-----------|
+| Finding impact class | `severity` (Critical/High/…) | `capability` forbidden-outcome taxonomy; Phase 5 reclassifies on demonstrated impact |
+| Dedup | Semantic frontmatter fields in Phase 3 | Stable root-cause `fingerprint` first, then semantic fields |
+| Blocked leads | Stay `PENDING` or get rejected | `NEEDS_VALIDATION` with blockers / local or owner check; Phase 4 can resume |
+| Finding ids | Always mint from `CC-0001` | `ID_SCHEME` / optional shared `ID_LEDGER` recorded at Phase 1 (`itemdb/notes/id-scheme.yml`) |
+| Source provenance | Not recorded | `itemdb/source-version.yml` via Phase 1 / `make source-version` |
+| Domain skills | Target-type skills only | Eleven Cloudflare-adapted companion skills selected from Phase 1 trust boundaries |
+| Report publish | Local Markdown only | `make confluence-export` / `make confluence-export-findings` (see [`docs/confluence-export.md`](docs/confluence-export.md)) |
+
+Core workflow, sandbox bootstrap, CodeQL integration, deep sweep, and the OpenCode wrapper remain aligned with upstream. Prefer contributing harness fixes upstream when they are not specific to these extensions.
+
 ## Documentation
 
 | Doc | What's in it |
 |-----|--------------|
 | [`docs/target-setup.md`](docs/target-setup.md) | Supported target layouts: copied source trees, submodules, archives, benchmark corpora |
-| [`docs/workflow.md`](docs/workflow.md) | Full phase-by-phase workflow reference |
+| [`docs/workflow.md`](docs/workflow.md) | Full phase-by-phase workflow reference (including id scheme, fingerprints, NEEDS_VALIDATION) |
 | [`docs/sandbox.md`](docs/sandbox.md) | Sandbox usage, boundaries, evidence capture, validation environment notes |
 | [`docs/file-risk-sweeps.md`](docs/file-risk-sweeps.md) | File risk index format and deep sweep reference |
+| [`docs/confluence-export.md`](docs/confluence-export.md) | Confluence Cloud/Server export auth and options |
 | [`docs/development.md`](docs/development.md) | Repository conventions, helper tools, contributor workflow |
 
 ## Contributing
 
-Issues, ideas, and pull requests are welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md). If something feels rough, that's probably because it is; please tell me about it.
+Issues, ideas, and pull requests are welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md). If something feels rough, that's probably because it is; please open an issue.
 
 ## Authors
+
+Upstream CodeCome:
 
 - **Pablo Ruiz García** — Project Lead  
   Architecture, engineering, implementation, and the person who turns vague ideas into working code.
 
 - **Alejandro Ramos** — Product Lead  
   Product direction, use cases, requirements, and official provider of impossible requests that somehow keep becoming roadmap items.
+
+This fork (`CodeCome-Recommended`) is maintained by [discernible-io](https://github.com/discernible-io). Prefer sending harness fixes that are not fork-specific to [pruiz/CodeCome](https://github.com/pruiz/CodeCome).
 
 ## Contributors
 
