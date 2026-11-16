@@ -227,6 +227,9 @@ tmp/*
 # CodeQL runtime artifacts
 itemdb/codeql/*
 
+itemdb/files/*
+!itemdb/files/.gitkeep
+
 # CodeCome runtime artifacts
 itemdb/index.md
 

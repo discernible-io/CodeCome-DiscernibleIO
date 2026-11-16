@@ -17,6 +17,7 @@ Read the following files (all paths are relative to the project/workspace root):
 - all findings under `itemdb/findings/` (including `NEEDS_VALIDATION/`)
 - all relevant evidence under `itemdb/evidence/`
 - If present, `itemdb/notes/threat-model.md` — operational threat model from Phase 1b: attacker capabilities and non-capabilities, trust-boundary summary, assets and security objectives, existing controls, and open assumptions. Use to ground Methodology, Scope, and Limitations sections.
+- If present, `itemdb/notes/learnings.md` — fingerprints already rejected, confirmed sinks, and leads blocked on an external fact. Cite it when the report explains what this audit stopped repeating. The harness refreshes this file after the report is written.
 
 ## Goal
 

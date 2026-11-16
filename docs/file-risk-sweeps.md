@@ -62,15 +62,26 @@ Preview selected files and generated prompts without invoking OpenCode:
 
 The sweep runner is sequential by default. It invokes the normal `auditor` agent with a specialized prompt (`prompts/phase-2-sweep.md`) that forces the model to read related dependencies and imports to establish complete source-to-sink context.
 
-### Resume on interruption
+### What the default sweep selects
 
-The sweep runner tracks successfully scanned files in `tmp/sweep-state.txt` (one path per line). If a sweep is interrupted or a file fails, re-running the same command will skip already-completed files and resume where it left off.
+`make scan` writes `itemdb/notes/candidates.yml` without calling a model. When that file exists, `make sweep` selects its non-test hits and any file listed by a usable CodeQL `file-signals.yml`. `FROM_INDEX=1` selects score 4+ files from the risk index instead. `FILE=` and `FILES=` always select those paths. `DIFF=origin/main` keeps only paths `git diff --name-only` reports against that ref.
 
-To force a fresh sweep of all files, use `RESET=1` or `RESTART=1`:
+`audit.budget.max_files` and `audit.budget.max_wall_clock_seconds` in `codecome.yml` stop the sweep between files. `0` means unlimited. `MAX_FILES=` and `MAX_SECONDS=` override one run.
+
+### Resume
+
+The sweep runner tracks successfully scanned files in two places:
+
+- `itemdb/files/<path>.yml` — append-only history. Each entry stores the file hash, model, matcher hits, finding ids, and fingerprints. A later run skips the file when the latest hash matches the bytes on disk.
+- `tmp/sweep-state.txt` — the older checklist. It still skips a file that has no file record yet.
+
+`RESET=1` or `RESTART=1` clears the checklist and forces another pass. It does not delete `itemdb/files/`. The new pass appends a history entry.
+
+To force a fresh sweep of all files:
 
     make sweep FILES="src/a.py,src/b.py" RESET=1
 
-You can also inspect or manually edit `tmp/sweep-state.txt` to remove files you want to re-sweep.
+Editing `tmp/sweep-state.txt` only affects files that do not yet have a matching `itemdb/files/` record. To resweep a recorded file, change the file or pass `RESET=1`.
 
 ### Generated files
 

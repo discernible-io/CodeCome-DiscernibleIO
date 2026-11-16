@@ -12,6 +12,7 @@ The initial PoC intentionally uses plain Markdown files instead of a database.
     ├── README.md
     ├── index.md
     ├── notes/
+    ├── files/
     ├── findings/
     │   ├── PENDING/
     │   ├── NEEDS_VALIDATION/
@@ -38,6 +39,8 @@ Expected files include:
     data-flow.md
     validation-model.md
     interesting-files.md
+    candidates.yml
+    learnings.md
     security-assumptions.md
 
 These files describe the target model and should be produced during Phase 1.

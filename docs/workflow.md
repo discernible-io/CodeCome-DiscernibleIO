@@ -149,7 +149,10 @@ All new findings must have:
 
 New findings must also have a stable root-cause `fingerprint`
 (`<class>:<path>#<symbol>[:<qualifier>]`); search existing findings for the
-same fingerprint before creating one.
+same fingerprint before creating one. `make scan` writes matcher hits to
+`itemdb/notes/candidates.yml`. When that file exists, `make sweep` reviews
+those files instead of every score 4+ path. `itemdb/notes/learnings.md`,
+when present, lists fingerprints Phase 2 must not re-file.
 
 New findings must not have:
 
@@ -176,7 +179,12 @@ Expected actions:
 - move source-grounded leads blocked on facts outside the repository and
   sandbox to `NEEDS_VALIDATION` (requires `fingerprint` and a
   `needs_validation` block with blockers and a local or owner check),
-- leave plausible findings in `PENDING`.
+- leave plausible findings in `PENDING` with `capability.disposition`
+  set to `live`, `dormant`, or `not-shipped`.
+
+`make phase-3` refreshes `itemdb/notes/learnings.md` after the review.
+`make chain` files one `PENDING` hypothesis with `gate: chained` when two
+or more findings are confirmed or exploited.
 
 Phase 3 should not normally mark findings as `CONFIRMED`.
 
@@ -185,6 +193,10 @@ Phase 3 should not normally mark findings as `CONFIRMED`.
 Goal:
 
     Prove or disprove one finding at a time.
+
+After a runnable proof confirms the finding, the same phase reruns that
+proof from `itemdb/evidence/<finding-id>/` without using the finding's
+hypothesis. A static-only confirmation records that this rerun does not apply.
 
 Run:
 

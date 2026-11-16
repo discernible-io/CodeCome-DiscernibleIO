@@ -408,19 +408,22 @@ When to use it:
 
 Trade-off: token cost scales linearly with the number of files swept (one full agent session per file). Sweep on 10 high-risk files costs roughly as many tokens as 10 Phase 2 runs. It produces overlapping findings that Phase 3 has to deduplicate. Always preview first with `--dry-run`.
 
-How it works: the sweep runner reads `itemdb/notes/file-risk-index.yml` (written by Phase 1), selects all files at score 4 or above (or the files matched by `FILE=`/`FILES=`), writes one prompt per file under `tmp/file-sweep-prompts/` (using `prompts/phase-2-sweep.md`), then invokes the `auditor` agent once per file in sequence. Each sweep run writes a Phase 2 summary at `runs/phase-2-summary-sweep-<slug>-YYYY-MM-DD-HHMMSS.md`.
+How it works: run `make scan` first when you want a free matcher pass. It writes `itemdb/notes/candidates.yml`. `make sweep` then selects those hits, plus files from a usable CodeQL run, and skips test paths unless `INCLUDE_TESTS=1`. If `candidates.yml` is absent, the sweep still selects score 4+ files from `itemdb/notes/file-risk-index.yml`. `FROM_INDEX=1` forces the index even when candidates exist. Explicit `FILE=` / `FILES=` always wins. The runner writes one prompt per file under `tmp/file-sweep-prompts/` (using `prompts/phase-2-sweep.md`) and invokes the `auditor` agent once per file. Each sweep run writes a Phase 2 summary at `runs/phase-2-summary-sweep-<slug>-YYYY-MM-DD-HHMMSS.md`.
 
-    make list-risk-files                           # preview which files would be swept
+    make scan                                      # matcher hits only; no model call
+    make list-risk-files                           # preview the risk index
     python tools/run-sweep.py --dry-run            # show selected files and prompts, no agent calls
-    make sweep                                     # sweep all files at score 4+
+    make sweep                                     # matcher hits, or score 4+ when no candidates file
+    make sweep FROM_INDEX=1                        # force the risk index
     make sweep FILE="src/**/*.cs"                  # sweep files matching a single glob pattern
     make sweep FILES="src/a.py,src/**/*.cs"        # sweep files matching multiple patterns
     make sweep FILES="src/**/*.py" EXCLUDE="src/vendor/**"  # exclude patterns
-    make sweep RESET=1                             # clear progress and restart fresh
+    make sweep DIFF=origin/main                    # only paths changed versus that ref
+    make sweep RESET=1                             # sweep again; append to file records
 
-Sweep tracking uses `tmp/sweep-state.txt` to record completed files. On re-run, already-scanned files are skipped, so you can safely interrupt and resume. Use `RESET=1` (or `RESTART=1`) to clear the state and sweep everything from scratch. After all selected files complete, the runner invokes a final aggregate sweep summary using `prompts/phase-2-sweep-summary.md` that consolidates findings, open questions, and re-run hints from all per-file summaries into `runs/sweep-summary-YYYY-MM-DD-HHMMSS.md`.
+A finished file is recorded under `itemdb/files/<path>.yml`. Resume skips a file whose latest record hashes the current bytes. `RESET=1` appends a new record instead of deleting history. `tmp/sweep-state.txt` is still written so an older interrupted run can resume. `audit.budget.max_files` and `audit.budget.max_wall_clock_seconds` in `codecome.yml` stop the sweep between files (`0` means unlimited). Override one run with `MAX_FILES=` or `MAX_SECONDS=`.
 
-Sweep findings overlap with Phase 2 output by design. Phase 3 deduplicates on semantic frontmatter fields (`sources`, `sinks`, `entry_points`, `trust_boundary`, `target_area`), so overlaps are merged gracefully.
+Sweep findings overlap with Phase 2 output by design. The sweep prompt asks the model to update an existing fingerprint instead of minting another id. Phase 3 still deduplicates on `fingerprint` first, then semantic frontmatter fields.
 
 See `docs/file-risk-sweeps.md` for the full reference.
 
@@ -428,13 +431,15 @@ See `docs/file-risk-sweeps.md` for the full reference.
 
     make phase-3
 
-Reviews candidate findings. Moves weak findings to `itemdb/findings/REJECTED/`, repeats (matched by `fingerprint` first, then semantic fields) to `itemdb/findings/DUPLICATE/`, and source-grounded leads blocked on facts outside the repo and sandbox to `itemdb/findings/NEEDS_VALIDATION/`.
+Reviews candidate findings. Moves weak findings to `itemdb/findings/REJECTED/`, repeats (matched by `fingerprint` first, then semantic fields) to `itemdb/findings/DUPLICATE/`, and source-grounded leads blocked on facts outside the repo and sandbox to `itemdb/findings/NEEDS_VALIDATION/`. A finding that stays pending gets `capability.disposition`: `live`, `dormant`, or `not-shipped`. After the review, the harness refreshes `itemdb/notes/learnings.md`.
+
+When two or more findings are confirmed, `make chain` files one `PENDING` hypothesis with `gate: chained`. The member list is not a demonstrated chain. Phase 4 and Phase 5 still have to show that one finding's effect depends on another.
 
 ### Phase 4 — validation
 
     make phase-4 FINDING=CC-0001
 
-One finding at a time. Stores evidence under `itemdb/evidence/<finding-id>/` and moves findings to `CONFIRMED/` or `REJECTED/`. A finding in `NEEDS_VALIDATION` can be resumed with the same command once the external fact is available.
+One finding at a time. Stores evidence under `itemdb/evidence/<finding-id>/` and moves findings to `CONFIRMED/` or `REJECTED/`. A finding in `NEEDS_VALIDATION` can be resumed with the same command once the external fact is available. After confirmation, the validator reruns a runnable proof from the evidence directory without using the finding's hypothesis. A static-only confirmation records that the rerun does not apply.
 
 To run validation across all PENDING findings:
 
@@ -687,7 +692,7 @@ The validator and exploiter may freely experiment inside `sandbox/`, but should 
 
 ### The core is target-agnostic
 
-CodeCome adapts to whatever sits under `src/`. Target-specific behavior lives in skills, adapters, notes, or config — not in the core workflow. Domain companion skills (`web-protocol-auth`, `core-attack-classes`, `memory-safety-binary`, `data-isolation-lifecycle`, `resource-exhaustion`, `protocols-messaging-security`, `supply-chain-security`, `cloud-deployment-security`, `client-side-security`, `desktop-mobile-ipc`, `ai-llm-security`) add vulnerability-class checklists on top of the target-type skills; reconnaissance selects the relevant ones.
+CodeCome adapts to whatever sits under `src/`. Target-specific behavior lives in skills, adapters, notes, or config — not in the core workflow. Domain companion skills (`web-protocol-auth`, `core-attack-classes`, `memory-safety-binary`, `data-isolation-lifecycle`, `resource-exhaustion`, `protocols-messaging-security`, `supply-chain-security`, `cloud-deployment-security`, `client-side-security`, `desktop-mobile-ipc`, `ai-llm-security`) add vulnerability-class checklists on top of the target-type skills; reconnaissance selects the relevant ones. Those eleven checklists are copied from Cloudflare's security-audit skill. See [Credits](#credits).
 
 ## Model selection and rerunning phases
 
@@ -794,7 +799,7 @@ Relative to [pruiz/CodeCome](https://github.com/pruiz/CodeCome) (`upstream/maste
 | Blocked leads | Stay `PENDING` or get rejected | `NEEDS_VALIDATION` with blockers / local or owner check; Phase 4 can resume |
 | Finding ids | Always mint from `CC-0001` | `ID_SCHEME` / optional shared `ID_LEDGER` recorded at Phase 1 (`itemdb/notes/id-scheme.yml`) |
 | Source provenance | Not recorded | `itemdb/source-version.yml` via Phase 1 / `make source-version` |
-| Domain skills | Target-type skills only | Eleven Cloudflare-adapted companion skills selected from Phase 1 trust boundaries |
+| Domain skills | Target-type skills only | Eleven checklists copied from Cloudflare's security-audit skill, selected from Phase 1 trust boundaries. See [Credits](#credits) |
 | Report publish | Local Markdown only | `make confluence-export` / `make confluence-export-findings` (see [`docs/confluence-export.md`](docs/confluence-export.md)) |
 
 Core workflow, sandbox bootstrap, CodeQL integration, deep sweep, and the OpenCode wrapper remain aligned with upstream. Prefer contributing harness fixes upstream when they are not specific to these extensions.
@@ -830,6 +835,36 @@ This fork (`CodeCome-Recommended`) is maintained by [discernible-io](https://git
 
 Contributions are welcome. Pull requests are expected, encouraged, and appreciated.
 
+## Credits
+
+### Copied from
+
+The hunting checklists in the eleven domain companion skills are copied from [Cloudflare's security-audit skill](https://github.com/cloudflare/security-audit-skill/tree/c1c8a8c1471069fb0e188eeaff69b8e8db6564a8/skills/security-audit) at `c1c8a8c1471069fb0e188eeaff69b8e8db6564a8`. Copyright (c) 2025-2026 Cloudflare, Inc., under the MIT License. The checklist text is unchanged. Each skill adds a CodeCome mapping section and rewrites cross-file links. The license text is in `third_party/cloudflare-security-audit-skill/LICENSE`, and `NOTICE` lists the same files.
+
+| Skill in this tree | Cloudflare file |
+|---|---|
+| `ai-llm-security` | `AI-AND-LLM.md` |
+| `client-side-security` | `CLIENT-SIDE.md` |
+| `cloud-deployment-security` | `CLOUD-AND-DEPLOYMENT.md` |
+| `core-attack-classes` | `ATTACK-CLASSES.md` |
+| `data-isolation-lifecycle` | `DATA-ISOLATION-AND-LIFECYCLE.md` |
+| `desktop-mobile-ipc` | `DESKTOP-MOBILE-AND-LOCAL-IPC.md` |
+| `memory-safety-binary` | `MEMORY-SAFETY-AND-BINARY.md` |
+| `protocols-messaging-security` | `PROTOCOLS-RPC-AND-MESSAGING.md` |
+| `resource-exhaustion` | `RESOURCE-EXHAUSTION-AND-AVAILABILITY.md` |
+| `supply-chain-security` | `SUPPLY-CHAIN-AND-RELEASE.md` |
+| `web-protocol-auth` | `WEB-PROTOCOL-AND-AUTH.md` |
+
+Commit `27c95d6` added these files and the `NOTICE` entry. The README license section did not mention them until this credit.
+
+### Inspired by
+
+No source from these harnesses is copied into this repository. The six-phase workflow, capability taxonomy, fingerprints, and `NEEDS_VALIDATION` come from upstream CodeCome and this fork. The implementations below follow ideas from a November 2026 comparison. Matcher patterns and highlight lines in `tools/matchers.py` are original.
+
+- [vercel-labs/deepsec](https://github.com/vercel-labs/deepsec) — `make scan` writes matcher hits before a sweep, `itemdb/files/` keeps append-only per-file history, and `make sweep DIFF=<ref>` limits the pass to a diff.
+- [google/mantis](https://github.com/google/mantis) — Phase 3 sets `capability.disposition` for production viability, `make chain` files a chain hypothesis, and `make learnings` keeps decided fingerprints for the next pass.
+- [anthropics/defending-code-reference-harness](https://github.com/anthropics/defending-code-reference-harness) — Phase 4 reruns a runnable proof from the evidence directory without using the finding's hypothesis.
+
 ## License
 
 CodeCome is dual-licensed under your choice of:
@@ -839,8 +874,11 @@ CodeCome is dual-licensed under your choice of:
 
 SPDX expression: `GPL-3.0-or-later OR AGPL-3.0-or-later`.
 
-The files under `templates/sandboxes/` are an exception: they are licensed under the **MIT License** so they can be copied into user workspaces without imposing copyleft obligations on those user projects.
+Two MIT exceptions sit beside that dual license:
 
-See `LICENSE`, `AGPL-LICENSE`, `templates/sandboxes/LICENSE`, and `NOTICE`. Contributions are accepted under the terms described in `CONTRIBUTING.md`.
+- `templates/sandboxes/` is MIT so those seeds can be copied into user workspaces without imposing copyleft on those projects. Text: `templates/sandboxes/LICENSE`.
+- The eleven Cloudflare skills listed under [Credits](#credits) stay MIT. Text: `third_party/cloudflare-security-audit-skill/LICENSE`.
+
+See `LICENSE`, `AGPL-LICENSE`, and `NOTICE`. Contributions are accepted under the terms described in `CONTRIBUTING.md`.
 
 Copyright (C) 2025-2026 Pablo Ruiz García <pablo.ruiz@gmail.com>.

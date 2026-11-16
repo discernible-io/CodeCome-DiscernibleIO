@@ -52,7 +52,11 @@ Use Phase 1 reconnaissance notes under:
 
 If `itemdb/notes/file-risk-index.yml` exists, use it to guide your attention to high-risk areas. **CRITICAL RULE:** In this global Phase 2 pass, focus on **macro-level vulnerabilities**: cross-component trust boundaries, architectural flaws, project-wide logic, and broad attack surfaces.
 
-Use `itemdb/notes/threat-model.md` to prioritize hypotheses around assets, attacker capabilities, explicit non-capabilities, existing controls, and abuse-path themes. Do not convert an abuse-path theme into a finding unless you identify a concrete, repository-backed vulnerable path with attacker control, trust-boundary crossing, security-relevant impact, and an actionable validation plan. 
+Use `itemdb/notes/threat-model.md` to prioritize hypotheses around assets, attacker capabilities, explicit non-capabilities, existing controls, and abuse-path themes. Do not convert an abuse-path theme into a finding unless you identify a concrete, repository-backed vulnerable path with attacker control, trust-boundary crossing, security-relevant impact, and an actionable validation plan.
+
+If `itemdb/notes/learnings.md` exists, read it. Do not create a finding whose `fingerprint` is listed under "Do not re-file".
+
+If `itemdb/notes/candidates.yml` exists, use its matcher hits as attention hints for the global pass. A hit is not a finding, and this pass still looks for bugs that span files. 
 
 Do NOT perform exhaustive line-by-line deep dives of individual files. Leave deep, line-by-line vulnerability hunting for the optional `make sweep` tool. Your goal here is to establish the broad, high-impact hypotheses that span the architecture.
 

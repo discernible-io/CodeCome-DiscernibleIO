@@ -16,6 +16,7 @@ Examples:
     ./tools/run-sweep.py --min-score 4 --limit 5
     ./tools/run-sweep.py --min-score 5 --dry-run
     ./tools/run-sweep.py --reset
+    ./tools/run-sweep.py --diff origin/main
 """
 
 from __future__ import annotations
@@ -38,9 +39,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _colors as C
 from codecome.config import resolve_runtime_config
+from file_records import append_entry, file_blob, is_current, load_record
+from findings.frontmatter import load_frontmatter
+from findings.ids import iter_finding_files
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INDEX = ROOT / "itemdb" / "notes" / "file-risk-index.yml"
+CANDIDATES_PATH = ROOT / "itemdb" / "notes" / "candidates.yml"
+FILES_ROOT = ROOT / "itemdb" / "files"
 PROMPT_TEMPLATE = ROOT / "prompts" / "phase-2-sweep.md"
 SWEEP_SUMMARY_PROMPT = ROOT / "prompts" / "phase-2-sweep-summary.md"
 TMP_DIR = ROOT / "tmp" / "file-sweep-prompts"
@@ -140,7 +146,200 @@ def clear_state() -> None:
     STATE_FILE.unlink(missing_ok=True)
 
 
-def build_prompt_for_file(file_path: str) -> Path:
+def load_budget(config_path: Path) -> tuple[int, int]:
+    """Return (max_files, max_wall_clock_seconds). Zero means unlimited."""
+    if yaml is None or not config_path.exists():
+        return 0, 0
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        return 0, 0
+    audit = data.get("audit") if isinstance(data.get("audit"), dict) else {}
+    budget = audit.get("budget") if isinstance(audit.get("budget"), dict) else {}
+
+    def _as_int(value: object) -> int:
+        try:
+            return max(0, int(value))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 0
+
+    return _as_int(budget.get("max_files")), _as_int(budget.get("max_wall_clock_seconds"))
+
+
+def git_diff_names(ref: str) -> set[str]:
+    result = subprocess.run(
+        ["git", "diff", "--name-only", ref, "--"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(detail or f"git diff failed for {ref}")
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
+def codeql_alert_paths(root: Path = ROOT) -> list[str]:
+    """Paths from a usable CodeQL file-signals document. Empty when absent."""
+    if yaml is None:
+        return []
+    manifest_path = root / "itemdb" / "codeql" / "last-run-manifest.yml"
+    if not manifest_path.exists():
+        return []
+    try:
+        manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError:
+        return []
+    if not isinstance(manifest, dict):
+        return []
+    health = manifest.get("health") if isinstance(manifest.get("health"), dict) else {}
+    if health.get("usable") is not True:
+        return []
+    run_id = manifest.get("run_id")
+    if not isinstance(run_id, str) or not run_id.strip():
+        return []
+    signals_path = root / "itemdb" / "codeql" / "runs" / run_id / "normalized" / "file-signals.yml"
+    if not signals_path.exists():
+        return []
+    try:
+        signals = yaml.safe_load(signals_path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError:
+        return []
+    if not isinstance(signals, dict):
+        return []
+    entries = signals.get("files")
+    if not isinstance(entries, list):
+        return []
+    paths: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get("path")
+        if isinstance(path, str) and path.strip():
+            paths.append(path.strip())
+    return list(dict.fromkeys(paths))
+
+
+def load_candidates_document(path: Path) -> dict[str, Any]:
+    if yaml is None or not path.exists():
+        return {}
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def candidate_files(path: Path, *, include_tests: bool) -> list[str]:
+    document = load_candidates_document(path)
+    entries = document.get("files")
+    if not isinstance(entries, list):
+        return []
+    selected: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        rel = entry.get("path")
+        matches = entry.get("matches")
+        if not isinstance(rel, str) or not rel.strip() or not matches:
+            continue
+        if entry.get("in_test") and not include_tests:
+            continue
+        selected.append(rel.strip())
+    return list(dict.fromkeys(selected))
+
+
+def prompt_extras(file_path: str, candidates_path: Path = CANDIDATES_PATH) -> tuple[str, str]:
+    document = load_candidates_document(candidates_path)
+    hits: list[str] = []
+    entries = document.get("files")
+    if isinstance(entries, list):
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("path") != file_path:
+                continue
+            matches = entry.get("matches")
+            if not isinstance(matches, list):
+                continue
+            for match in matches:
+                if not isinstance(match, dict):
+                    continue
+                hits.append(
+                    f"- line {match.get('line')}: `{match.get('slug')}` — {match.get('reason')}"
+                )
+    highlights = document.get("highlights")
+    if isinstance(highlights, dict):
+        for tag, lines in highlights.items():
+            if not isinstance(lines, list):
+                continue
+            for line in lines:
+                if isinstance(line, str) and line.strip():
+                    hits.append(f"- {tag}: {line.strip()}")
+    fingerprints: list[str] = []
+    record = load_record(FILES_ROOT, file_path)
+    if record:
+        history = record.get("history")
+        if isinstance(history, list) and history and isinstance(history[-1], dict):
+            prior = history[-1].get("fingerprints")
+            if isinstance(prior, list):
+                fingerprints.extend(str(item) for item in prior if isinstance(item, str) and item)
+    findings_root = ROOT / "itemdb" / "findings"
+    if findings_root.exists():
+        for finding in iter_finding_files(findings_root=findings_root):
+            data = load_frontmatter(finding)
+            files = data.get("files") if isinstance(data, dict) else None
+            fingerprint = data.get("fingerprint") if isinstance(data, dict) else None
+            if isinstance(files, list) and file_path in files and isinstance(fingerprint, str) and fingerprint:
+                fingerprints.append(fingerprint)
+    hits_block = "\n".join(hits)
+    fingerprint_block = "\n".join(f"- `{item}`" for item in dict.fromkeys(fingerprints))
+    return hits_block, fingerprint_block
+
+
+def should_skip(rel: str, completed: set[str], reset: bool) -> bool:
+    if reset:
+        return False
+    source = ROOT / rel
+    if is_current(FILES_ROOT, source, rel):
+        return True
+    if load_record(FILES_ROOT, rel) is not None:
+        return False
+    return rel in completed
+
+
+def record_sweep(rel: str, *, model: str) -> None:
+    source = ROOT / rel
+    blob = file_blob(source) if source.is_file() else ""
+    hits_block, fingerprint_block = prompt_extras(rel)
+    candidates: list[dict[str, Any]] = []
+    for line in hits_block.splitlines():
+        if line.startswith("- line "):
+            candidates.append({"text": line[2:]})
+    fingerprints = [
+        line.strip().strip("-").strip().strip("`")
+        for line in fingerprint_block.splitlines()
+        if line.strip()
+    ]
+    finding_ids: list[str] = []
+    findings_root = ROOT / "itemdb" / "findings"
+    if findings_root.exists():
+        for finding in iter_finding_files(findings_root=findings_root):
+            data = load_frontmatter(finding)
+            if not isinstance(data, dict):
+                continue
+            files = data.get("files")
+            if isinstance(files, list) and rel in files:
+                finding_id = data.get("id")
+                if isinstance(finding_id, str) and finding_id:
+                    finding_ids.append(finding_id)
+    append_entry(
+        FILES_ROOT,
+        rel,
+        blob=blob,
+        model=model,
+        candidates=candidates,
+        finding_ids=finding_ids,
+        fingerprints=fingerprints,
+    )
+
+
+def build_prompt_for_file(file_path: str, *, hits: str = "", fingerprints: str = "") -> Path:
     if not PROMPT_TEMPLATE.exists():
         raise FileNotFoundError(f"missing prompt template: {PROMPT_TEMPLATE.relative_to(ROOT)}")
     template = PROMPT_TEMPLATE.read_text(encoding="utf-8")
@@ -150,6 +349,19 @@ def build_prompt_for_file(file_path: str) -> Path:
 
     TMP_DIR.mkdir(parents=True, exist_ok=True)
     prompt = template.replace(placeholder, file_path)
+    if hits.strip():
+        prompt += (
+            "\n## Matcher hits for this file\n\n"
+            "Investigate these lines first. A hit is not a finding.\n\n"
+            f"{hits.strip()}\n"
+        )
+    if fingerprints.strip():
+        prompt += (
+            "\n## Existing fingerprints for this file\n\n"
+            "If a hypothesis has the same root cause, update that finding "
+            "instead of creating another id.\n\n"
+            f"{fingerprints.strip()}\n"
+        )
     prompt_path = TMP_DIR / f"sweep-{slugify(file_path)}.md"
     prompt_path.write_text(prompt, encoding="utf-8")
     return prompt_path
@@ -161,7 +373,8 @@ def run_gate_checks() -> None:
 
 
 def run_one_file(file_path: str, dry_run: bool) -> int:
-    prompt_path = build_prompt_for_file(file_path)
+    hits, fingerprints = prompt_extras(file_path)
+    prompt_path = build_prompt_for_file(file_path, hits=hits, fingerprints=fingerprints)
     print(C.header(f"Deep Sweep: {file_path}"))
     print(f"Prompt: {prompt_path.relative_to(ROOT)}")
 
@@ -254,7 +467,16 @@ def main() -> int:
     parser.add_argument("--file", action="append", default=[], help="Specific file or glob to sweep. May be repeated.")
     parser.add_argument("--files", default=None, help="Comma-separated list of file patterns (convenience; added to --file args)")
     parser.add_argument("--exclude", default=None, help="Comma-separated list of glob patterns to exclude from sweep")
-    parser.add_argument("--reset", action="store_true", help="Clear sweep progress state and start fresh")
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="Sweep again even when the file record matches current bytes. History is kept.",
+    )
+    parser.add_argument("--diff", default="", help="Limit the sweep to paths changed versus this git ref")
+    parser.add_argument("--from-index", action="store_true", help="Select score-threshold files even when candidates.yml exists")
+    parser.add_argument("--include-tests", action="store_true", help="Sweep matcher hits under test paths")
+    parser.add_argument("--max-files", type=int, default=None, help="Stop after this many files (0 = unlimited)")
+    parser.add_argument("--max-seconds", type=int, default=None, help="Stop after this many seconds (0 = unlimited)")
     parser.add_argument("--index", default=str(DEFAULT_INDEX), help="Path to file-risk-index.yml")
     parser.add_argument("--min-score", type=int, default=4, help="Minimum risk score when selecting from the index")
     parser.add_argument("--limit", type=int, default=None, help="Maximum number of indexed files to sweep")
@@ -270,7 +492,7 @@ def main() -> int:
 
     if args.reset:
         clear_state()
-        print(C.info("Sweep state cleared — starting fresh."))
+        print(C.info("Progress checklist cleared. File records are kept; this pass will append."))
 
     index_path = Path(args.index)
     if not index_path.is_absolute():
@@ -279,6 +501,14 @@ def main() -> int:
     try:
         if args.file:
             candidates = expand_file_args(args.file)
+        elif CANDIDATES_PATH.exists() and not args.from_index:
+            candidates = candidate_files(CANDIDATES_PATH, include_tests=args.include_tests)
+            for path in codeql_alert_paths(ROOT):
+                if path not in candidates:
+                    candidates.append(path)
+            if args.limit is not None:
+                candidates = candidates[: args.limit]
+            print(C.info("Selecting matcher hits and usable CodeQL alerts."))
         else:
             candidates = select_from_index(index_path, args.min_score, args.limit)
     except Exception as exc:  # noqa: BLE001
@@ -307,9 +537,31 @@ def main() -> int:
         print(C.warn("No files selected for sweep after exclusions."))
         return 0
 
+    if args.diff:
+        try:
+            changed = git_diff_names(args.diff)
+        except RuntimeError as exc:
+            print(C.fail(str(exc)), file=sys.stderr)
+            return 1
+        before = len(candidates)
+        candidates = [path for path in candidates if path in changed]
+        print(C.info(f"Diff {args.diff}: kept {len(candidates)} of {before} file(s)."))
+        if not candidates:
+            print(C.warn("No selected files are in the diff."))
+            return 0
+
+    present = [path for path in candidates if (ROOT / path).is_file()]
+    missing = len(candidates) - len(present)
+    if missing:
+        print(C.info(f"Skipping {missing} selected path(s) that are not files."))
+    candidates = present
+    if not candidates:
+        print(C.warn("No files selected for sweep."))
+        return 0
+
     completed = load_completed()
-    files = [f for f in candidates if f not in completed]
-    skipped = [f for f in candidates if f in completed]
+    files = [path for path in candidates if not should_skip(path, completed, args.reset)]
+    skipped = [path for path in candidates if path not in files]
 
     if skipped:
         print(C.info(f"Skipping {len(skipped)} already-scanned file(s):"))
@@ -351,12 +603,30 @@ def main() -> int:
             print(C.fail(f"Readiness gate failed with exit code {exc.returncode}"), file=sys.stderr)
             return int(exc.returncode)
 
+    config_files, config_seconds = load_budget(ROOT / "codecome.yml")
+    max_files = config_files if args.max_files is None else max(0, args.max_files)
+    max_seconds = config_seconds if args.max_seconds is None else max(0, args.max_seconds)
+    model_name = ""
+    if not args.dry_run:
+        try:
+            model_name = resolve_runtime_config("auditor").model or ""
+        except Exception:  # noqa: BLE001
+            model_name = ""
+
     sweep_start_time = time.time()
+    finished: list[str] = []
     for file_path in files:
+        if max_files and len(finished) >= max_files:
+            print(C.warn(f"Budget stopped the sweep after {max_files} file(s). Re-run to continue."))
+            break
+        if max_seconds and (time.time() - sweep_start_time) >= max_seconds:
+            print(C.warn(f"Budget stopped the sweep after {max_seconds}s. Re-run to continue."))
+            break
         code = run_one_file(file_path, args.dry_run)
         if code != 0:
             print(C.fail(f"Sweep failed for {file_path} with exit code {code}"), file=sys.stderr)
             return code
+        finished.append(file_path)
         if not args.dry_run:
             summaries = list(
                 (ROOT / "runs").glob(f"phase-2-summary-sweep-{slugify(file_path)}-*.md")
@@ -364,14 +634,15 @@ def main() -> int:
             recent = [s for s in summaries if s.stat().st_mtime >= sweep_start_time]
             if recent:
                 mark_done(file_path)
+                record_sweep(file_path, model=model_name)
             else:
                 print(C.warn(f"No sweep summary found for {file_path} — will re-sweep on next run"))
 
-    if not args.dry_run:
-        all_files = files + skipped
+    if not args.dry_run and finished:
+        all_files = finished + skipped
         fresh_summaries: list[str] = []
         seen = set()
-        for f in files:
+        for f in finished:
             for s in sorted(
                 (ROOT / "runs").glob(f"phase-2-summary-sweep-{slugify(f)}-*.md"),
                 key=lambda p: p.stat().st_mtime,

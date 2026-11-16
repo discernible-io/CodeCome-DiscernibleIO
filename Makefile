@@ -4,7 +4,7 @@
 .PHONY: help init venv env-check check status next-id frontmatter check-phase-artifacts tests test-parity itemdb-reset codeql-clean index report source-version
 .PHONY: findings findings-create findings-move findings-evidence findings-package
 .PHONY: confluence-export confluence-export-findings
-.PHONY: phase-1 phase-2 phase-3 phase-4 phase-5 phase-6 validate-all exploit-all opencode-raw
+.PHONY: phase-1 phase-2 phase-3 phase-4 phase-5 phase-6 validate-all exploit-all opencode-raw scan chain learnings
 .PHONY: sandbox-setup sandbox-check sandbox-up sandbox-down sandbox-shell sandbox-logs sandbox-clean sandbox-reset sandbox-build sandbox-test
 .PHONY: sandbox-list sandbox-inspect sandbox-detect sandbox-bootstrap sandbox-validate sandbox-regenerate sandbox-status show-model
 
@@ -70,11 +70,16 @@ help:
 	@printf "  $(BOLD)$(CYAN)Deep Sweep (Optional):$(RESET)\n"
 	@printf "\n"
 	@printf "    $(BOLD)make list-risk-files$(RESET)          List top-scoring risky files from index\n"
-	@printf "    $(BOLD)make sweep$(RESET)                   Run deep sweep on top-scoring files\n"
+	@printf "    $(BOLD)make sweep$(RESET)                   Run deep sweep on matcher hits, or score 4+ files\n"
+	@printf "    $(BOLD)make scan$(RESET)                    Write matcher hits to itemdb/notes/candidates.yml\n"
 	@printf "    $(BOLD)make sweep FILES=\"src/a.*,src/b.*\"$(RESET) Run deep sweep on patterns (comma-separated)\n"
 	@printf "    $(BOLD)make sweep FILE=\"src/foo.*\"$(RESET)  Run deep sweep on single file pattern\n"
 	@printf "    $(BOLD)make sweep FILES=... EXCLUDE=...$(RESET) Exclude patterns (comma-separated globs)\n"
-	@printf "    $(BOLD)make sweep RESET=1$(RESET)           Clear sweep progress and start fresh\n"
+	@printf "    $(BOLD)make sweep DIFF=origin/main$(RESET)  Sweep only paths changed versus that git ref\n"
+	@printf "    $(BOLD)make sweep FROM_INDEX=1$(RESET)      Ignore candidates.yml and use the risk index\n"
+	@printf "    $(BOLD)make sweep RESET=1$(RESET)           Sweep again; file-record history is kept\n"
+	@printf "    $(BOLD)make chain$(RESET)                   File a chain hypothesis from confirmed findings\n"
+	@printf "    $(BOLD)make learnings$(RESET)               Refresh itemdb/notes/learnings.md\n"
 	@printf "\n"
 	@printf "  $(BOLD)$(CYAN)Phase controls:$(RESET)\n"
 	@printf "\n"
@@ -212,6 +217,7 @@ phase-2: env-check
 phase-3: env-check
 	@$(PYTHON) tools/gate-check.py 3
 	@$(PYTHON) tools/run-agent.py --phase 3 --label "Counter-analysis" --agent reviewer --prompt-file prompts/phase-3-review.md
+	@$(PYTHON) tools/write-learnings.py
 
 phase-4: env-check
 	@test -n "$(FINDING)" || (printf "\n$(BOLD)$(RED)[FAIL]$(RESET) Missing required FINDING argument for Phase 4 (Validation).\n\nSpecify which finding you want to validate:\n\n    $(BOLD)make phase-4 FINDING=CC-0001$(RESET)\n\nTo list available pending findings: $(BOLD)make findings STATUS=PENDING$(RESET)\n\n" && exit 1)
@@ -226,6 +232,7 @@ phase-5: env-check
 phase-6: env-check
 	@$(PYTHON) tools/gate-check.py 6
 	@$(PYTHON) tools/run-agent.py --phase 6 --label "Reporting" --agent reporter --prompt-file prompts/phase-6-report.md
+	@$(PYTHON) tools/write-learnings.py
 
 chat: env-check
 	@$(PYTHON) tools/run-agent.py --chat --label "Interactive Chat" --agent $(or $(AGENT),chat) --prompt-file prompts/chat-initial.md $(if $(DEBUG),--debug,)
@@ -233,11 +240,25 @@ chat: env-check
 list-risk-files: env-check
 	@$(PYTHON) tools/list-risk-files.py
 
+scan: env-check
+	@$(PYTHON) tools/scan-candidates.py
+
+chain: env-check
+	@$(PYTHON) tools/chain-findings.py
+
+learnings: env-check
+	@$(PYTHON) tools/write-learnings.py
+
 sweep: env-check
 	@$(PYTHON) tools/run-sweep.py \
 		$(if $(FILES),--files "$(FILES)") \
 		$(if $(FILE),--file "$(FILE)") \
 		$(if $(EXCLUDE),--exclude "$(EXCLUDE)") \
+		$(if $(DIFF),--diff "$(DIFF)") \
+		$(if $(filter 1,$(FROM_INDEX)),--from-index) \
+		$(if $(filter 1,$(INCLUDE_TESTS)),--include-tests) \
+		$(if $(MAX_FILES),--max-files "$(MAX_FILES)") \
+		$(if $(MAX_SECONDS),--max-seconds "$(MAX_SECONDS)") \
 		$(if $(filter 1,$(RESET) $(RESTART)),--reset)
 
 # ---------------------------------------------------------------------------
@@ -314,6 +335,10 @@ itemdb-reset: env-check
 	rm -f itemdb/findings/DUPLICATE/CC-*.md
 	rm -f runs/*.md
 	rm -rf tmp/*
+	rm -rf itemdb/files
+	rm -f itemdb/notes/candidates.yml
+	rm -f itemdb/notes/learnings.md
+	mkdir -p itemdb/files
 	touch itemdb/notes/.gitkeep
 	touch itemdb/evidence/.gitkeep
 	touch itemdb/reports/.gitkeep
@@ -323,6 +348,7 @@ itemdb-reset: env-check
 	touch itemdb/findings/EXPLOITED/.gitkeep
 	touch itemdb/findings/REJECTED/.gitkeep
 	touch itemdb/findings/DUPLICATE/.gitkeep
+	touch itemdb/files/.gitkeep
 	touch runs/.gitkeep
 	touch tmp/.gitkeep
 	$(PYTHON) tools/render-index.py

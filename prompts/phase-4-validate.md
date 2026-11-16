@@ -211,6 +211,14 @@ Update:
 
 Reference evidence files by relative path.
 
+## Proof-only rerun
+
+After the finding is `CONFIRMED` and `itemdb/evidence/<finding-id>/` contains a runnable proof (a script, request, or command), run that proof again. For this rerun, use the evidence directory and the proof artifact. Do not use the finding's hypothesis, counter-analysis, or validation-plan prose to decide what the proof should do.
+
+Record the command and the observed result in the evidence README under `## Proof-only rerun`.
+
+If the rerun fails, move the finding back to `PENDING` and record the failure. If the only evidence is a static proof and there is no runnable artifact, write `proof-only rerun: not applicable (static proof)` in the evidence README and leave the finding `CONFIRMED`.
+
 ## Final response
 
 Run `make frontmatter` to ensure the finding's frontmatter is valid and fix any reported errors before finishing.
@@ -220,6 +228,7 @@ At the end, summarize:
 - finding validated,
 - validation method used,
 - result: CONFIRMED / REJECTED / NEEDS_VALIDATION / UNRESOLVED,
+- proof-only rerun: command and result, or not applicable,
 - evidence files created,
 - finding file moved or updated,
 - threat-model assumptions that materially affected validation strategy or evidence interpretation,

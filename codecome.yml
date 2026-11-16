@@ -16,6 +16,10 @@ target:
 audit:
   mode: "sequential"
 
+  budget:
+    max_files: 0
+    max_wall_clock_seconds: 0
+
   phases:
     - reconnaissance
     - hypothesis_generation

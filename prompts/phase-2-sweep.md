@@ -55,6 +55,10 @@ Analyze this target file:
 
     FILE_PATH_OR_ID
 
+If `itemdb/notes/learnings.md` exists, do not re-file a fingerprint listed under "Do not re-file".
+
+The sweep runner appends matcher hits and existing fingerprints for this file when it has them. Investigate hits first. A hit is not a finding. If a fingerprint names the same root cause, update that finding instead of minting another id.
+
 ## Scope rules
 
 Primary focus:

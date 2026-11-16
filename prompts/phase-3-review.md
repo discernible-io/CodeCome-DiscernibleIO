@@ -220,6 +220,16 @@ Instead:
 - document assumptions,
 - improve validation plan.
 
+## Production viability
+
+Before a finding stays `PENDING`, set `capability.disposition` to one of:
+
+- `live` — the path is reachable in the shipped configuration.
+- `dormant` — the code is present, but a flag, build tag, or default-off path keeps it out of the shipped configuration.
+- `not-shipped` — the path exists only in tests, fixtures, examples, or debug-only code that the shipped build does not include.
+
+Say which of those you checked: debug-only code, test or fixture code, a feature flag that defaults off, or a path a shipped caller can reach. A finding that still depends on a fact outside the repository and the sandbox goes to `NEEDS_VALIDATION` instead. Do not invent a severity score. The capability block is the classification.
+
 ## Final response
 
 Run `make frontmatter` to ensure all modified findings have valid frontmatter and fix any reported errors before finishing.
@@ -231,6 +241,7 @@ At the end, summarize:
 - findings moved to REJECTED,
 - findings moved to DUPLICATE,
 - findings moved to NEEDS_VALIDATION (with the external blockers),
+- disposition set on findings that stayed PENDING (`live`, `dormant`, or `not-shipped`),
 - findings weakened or rejected due to attacker non-capabilities or existing controls from `threat-model.md`,
 - findings kept because they cross a documented trust boundary or affect a documented asset,
 - threat-model assumptions that affected counter-analysis,
